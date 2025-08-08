@@ -1,21 +1,19 @@
 import WebSocket from "ws";
 import fetch from "node-fetch";
 
-// 1) מקור האירועים של TikFinity (מקומי על המחשב שלך)
-const TIKFINITY_WS = "ws://localhost:21213";
+// 1) TikFinity WS (ngrok/wss) מה־ENV, עם ברירת מחדל ל־localhost לטסטים מקומיים
+const TIKFINITY_WS = process.env.TIKFINITY_WS_URL || "ws://localhost:21213";
 
-// 2) ה-Relay שלך ב-Render
-const RELAY_URL = "https://snoke-tikfinity-forwarder.onrender.com/webhooks/tikfinity";
+// 2) כתובת ה-Relay (זה שמזרים לאתר), גם מה-ENV עם ברירת מחדל בטוחה
+const RELAY_URL = process.env.RELAY_URL || "https://snoke-relay.onrender.com/webhooks/tikfinity";
 
-// לוג עזר קצר
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 
-// מנרמל את אירועי TikFinity לפורמט שהאתר שלך מבין
 function normalize(ev) {
   const type = ev.event || ev.type || "unknown";
   const d = ev.data || ev.payload || {};
 
-  const user = d.user || d.sender || d.username ? {
+  const user = (d.user || d.sender || d.username) ? {
     id: d.userId || d.uid || undefined,
     name: d.username || d.user || d.sender || "Someone",
     avatar: d.profilePictureUrl || d.avatar || undefined
@@ -48,9 +46,7 @@ function start() {
 
       const res = await fetch(RELAY_URL, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(event)
       });
 
