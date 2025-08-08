@@ -1,69 +1,96 @@
-import WebSocket from "ws";
-import fetch from "node-fetch";
+// server.js
+import express from "express";
+import http from "http";
+import { Server as SocketIOServer } from "socket.io";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
 
-// 1) TikFinity WS (ngrok/wss) מה־ENV, עם ברירת מחדל ל־localhost לטסטים מקומיים
-const TIKFINITY_WS = process.env.TIKFINITY_WS_URL || "ws://localhost:21213";
+const app = express();
 
-// 2) כתובת ה-Relay (זה שמזרים לאתר), גם מה-ENV עם ברירת מחדל בטוחה
-const RELAY_URL = process.env.RELAY_URL || "https://snoke-relay.onrender.com/webhooks/tikfinity";
+// --- basic middleware ---
+app.use(cors({ origin: "*"}));
+app.use(express.json({ limit: "256kb" }));       // JSON bodies
+app.use(express.text({ type: "*/*", limit: "256kb" })); // fallback if someone posts text
 
-const log = (...args) => console.log(new Date().toISOString(), ...args);
+// --- http + socket.io ---
+const server = http.createServer(app);
+const io = new SocketIOServer(server, { cors: { origin: "*" } });
 
-function normalize(ev) {
-  const type = ev.event || ev.type || "unknown";
-  const d = ev.data || ev.payload || {};
+// Optional secret (NOT required). If not set, webhook is open.
+const SECRET = process.env.WEBHOOK_SECRET || "";
 
-  const user = (d.user || d.sender || d.username) ? {
-    id: d.userId || d.uid || undefined,
-    name: d.username || d.user || d.sender || "Someone",
-    avatar: d.profilePictureUrl || d.avatar || undefined
-  } : undefined;
+// Slight protection from spammy sources
+const limiter = rateLimit({ windowMs: 5_000, max: 100 });
+app.use("/webhooks/tikfinity", limiter);
 
-  const gift = d.gift ? {
-    name: d.gift.name || d.giftType || "Gift",
-    amount: d.gift.repeatCount || d.gift.amount || 1,
-    value: d.gift.diamondCount || d.gift.value || 0
-  } : undefined;
+// Health checks
+app.get("/", (_req, res) => res.status(200).send("TikFinity Relay OK"));
+app.get("/health", (_req, res) => res.status(200).json({ ok: true, ts: Date.now() }));
 
+// Normalize incoming TikFinity-like events to a simple schema
+function normalizeEvent(raw) {
+  let body = raw;
+  if (typeof raw === "string") {
+    try { body = JSON.parse(raw); } catch { body = { type: "unknown", payload: { raw } }; }
+  }
+
+  const type = body.type || body.event || "unknown";
+  const data = body.data || body.payload || {};
+
+  // standardize user if exists
+  const user = body.user || body.sender || (data.user || null);
+
+  // standardize live payload
   const payload =
-    type === "gift" ? { gift } :
-    type === "live_status" ? { isLive: d.isLive, viewers: d.viewers } :
-    d;
+    type === "live_status"
+      ? {
+          isLive: data?.live?.isLive ?? data?.isLive ?? false,
+          viewers: data?.live?.viewers ?? data?.viewers ?? 0,
+        }
+      : body.payload || body.data || {};
 
-  return { type, user, payload, ts: Date.now() };
+  return {
+    type,
+    user: user || null,
+    payload,
+    ts: Date.now(),
+  };
 }
 
-function start() {
-  const ws = new WebSocket(TIKFINITY_WS);
+// Main webhook endpoint (POST)
+app.post("/webhooks/tikfinity", (req, res) => {
+  // If SECRET is set, enforce header check. Otherwise, accept everything.
+  if (SECRET) {
+    const sig = req.header("x-webhook-secret");
+    if (sig !== SECRET) return res.status(401).send("unauthorized");
+  }
 
-  ws.on("open", () => log("Connected to TikFinity WS:", TIKFINITY_WS));
+  const raw = req.is("application/json") ? req.body : req.body ?? {};
+  const event = normalizeEvent(raw);
 
-  ws.on("message", async (buf) => {
-    try {
-      const raw = JSON.parse(buf.toString());
-      const event = normalize(raw);
-      log("Event:", event.type, event.user?.name ?? "", event.payload?.gift?.name ?? "");
+  // broadcast to site
+  io.emit("tikfinity:event", event);
 
-      const res = await fetch(RELAY_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(event)
-      });
+  // small OK
+  res.sendStatus(200);
+});
 
-      if (!res.ok) {
-        log("Relay POST failed", res.status, await res.text());
-      }
-    } catch (e) {
-      log("Parse/send error:", e.message);
-    }
+// Socket.io basic hello
+io.on("connection", (socket) => {
+  console.log("[relay] client connected", socket.id);
+  socket.emit("relay:hello", { ok: true, ts: Date.now() });
+  socket.on("disconnect", () => {
+    console.log("[relay] client disconnected", socket.id);
   });
+});
 
-  ws.on("close", () => {
-    log("TikFinity WS closed. Reconnecting in 3s...");
-    setTimeout(start, 3000);
-  });
-
-  ws.on("error", (err) => log("WS error:", err.message));
-}
-
-start();
+// Start
+const PORT = process.env.PORT || 3001;
+server.listen(PORT, () => {
+  console.log(`[relay] listening on :${PORT}`);
+  if (SECRET) {
+    console.log(`[relay] WEBHOOK_SECRET is enabled.`);
+  } else {
+    console.log(`[relay] No WEBHOOK_SECRET set (webhook is open).`);
+  }
+});
