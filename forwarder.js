@@ -5,10 +5,7 @@ import fetch from "node-fetch";
 const TIKFINITY_WS = "ws://localhost:21213";
 
 // 2) ה-Relay שלך ב-Render
-const RELAY_URL = "https://snoke-relay.onrender.com/webhooks/tikfinity";
-
-// 3) אותו SECRET ששמת ב-Render
-const SECRET = "Snoke_2025_live";
+const RELAY_URL = "https://snoke-tikfinity-forwarder.onrender.com/webhooks/tikfinity";
 
 // לוג עזר קצר
 const log = (...args) => console.log(new Date().toISOString(), ...args);
@@ -52,8 +49,7 @@ function start() {
       const res = await fetch(RELAY_URL, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "x-webhook-secret": SECRET
+          "Content-Type": "application/json"
         },
         body: JSON.stringify(event)
       });
